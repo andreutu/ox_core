@@ -11,7 +11,7 @@ import { PLATE_PATTERN } from '../../common/config';
 import type { Dict, VehicleData } from 'types';
 import { GetVehicleData, GetVehicleNetworkType } from '../../common/vehicles';
 import { setVehicleProperties } from '@overextended/ox_lib/server';
-import { Vector3 } from '@nativewrappers/fivem';
+import { Vector3 } from '@nativewrappers/server';
 
 const setEntityOrphanMode = typeof SetEntityOrphanMode !== 'undefined' ? SetEntityOrphanMode : () => {};
 
@@ -207,6 +207,8 @@ export class OxVehicle extends ClassInterface {
   }
 
   despawn(save?: boolean) {
+    emit('ox:despawnVehicle', this.entity, this.id);
+
     const saveData = save && this.#getSaveData();
     if (saveData) SaveVehicleData(saveData);
     if (DoesEntityExist(this.entity)) DeleteEntity(this.entity);
@@ -252,7 +254,7 @@ export class OxVehicle extends ClassInterface {
   }
 
   setProperties(properties: VehicleProperties, apply?: boolean) {
-    this.#properties = properties;
+    this.#properties = typeof properties === 'string' ? JSON.parse(properties) : properties;
 
     if (apply) setVehicleProperties(this.entity, this.#properties);
   }
