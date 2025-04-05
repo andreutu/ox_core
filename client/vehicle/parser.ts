@@ -1,138 +1,181 @@
-import { cache, notify, onServerCallback, requestModel } from '@overextended/ox_lib/client';
+import { cache, notify, onServerCallback, requestModel, sleep } from '@overextended/ox_lib/client';
 import { GetTopVehicleStats, GetVehicleData } from '../../common/vehicles';
-import { VehicleData, VehicleTypes, VehicleStats, VehicleCategories } from 'types';
+import type { VehicleData, VehicleTypes, VehicleCategories } from 'types';
 
-const vehiclePriceModifiers: Partial<Record<VehicleTypes, number>> = {
+const PRICE_WEIGHTS: Record<VehicleTypes, number> = {
   automobile: 1600,
   bicycle: 150,
   bike: 500,
   boat: 6000,
   heli: 90000,
   plane: 16000,
-  quadbike: 600,
+  quadbike: 1100,
   train: 6000,
-  submarinecar: 18000,
-  submarine: 17200,
-  blimp: 12000,
+  submarinecar: 26000,
+  submarine: 22000,
+  blimp: 14000,
   trailer: 10000,
+  amphibious_automobile: 6400,
+  amphibious_quadbike: 4600
 };
 
-onServerCallback('ox:generateVehicleData', async (parseAll: boolean) => {
-  const coords = GetEntityCoords(cache.ped, true);
-  const vehicles: Record<string, VehicleData> = {} as any;
-  const vehicleModels: string[] = GetAllVehicleModels()
-    .map((vehicle: string) => {
-      vehicle = vehicle.toLowerCase();
+const BATCH_SIZE = 10;
+const vehicles = GetVehicleData();
 
-      return parseAll ? vehicle : GetVehicleData(vehicle) ? undefined : vehicle;
-    })
-    .filter((vehicle?: string) => vehicle)
+function GetVehicleModels(parseAll: boolean): string[] {
+  return GetAllVehicleModels()
+    .filter((vehicle: string) => parseAll || !vehicles[vehicle])
     .sort();
+}
+
+async function IsModelValid(hash: number): Promise<boolean> {
+  try {
+    await requestModel(hash, 10000);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function SpawnVehicle(hash: number, coords: [number, number, number]): number {
+  const entity = CreateVehicle(hash, ...coords, 0, false, false);
+  SetPedIntoVehicle(cache.ped, entity, -1);
+  return entity;
+}
+
+function GetVehicleTypeEx(entity: number): VehicleTypes {
+  switch (GetVehicleTypeRaw(entity)) {
+    case 0:
+    default:
+      return 'automobile';
+    case 1:
+      return 'plane';
+    case 2:
+      return 'trailer';
+    case 3:
+      return 'quadbike';
+    case 5:
+      return 'submarinecar';
+    case 6:
+      return 'amphibious_automobile';
+    case 7:
+      return 'amphibious_quadbike';
+    case 8:
+      return 'heli';
+    case 9:
+      return 'blimp';
+    case 11:
+      return 'bike';
+    case 12:
+      return 'bicycle';
+    case 13:
+      return 'boat';
+    case 14:
+      return 'train';
+    case 15:
+      return 'submarine';
+  }
+}
+
+function ParseVehicleData(entity: number, hash: number, model: string): VehicleData {
+  let make = GetMakeNameFromVehicleModel(hash);
+  if (!make) make = GetMakeNameFromVehicleModel(model.replace(/\W/g, '')) || '';
+
+  const vehicleType = GetVehicleTypeEx(entity);
+  const vehicleCategory: VehicleCategories =
+    vehicleType === 'heli' || vehicleType === 'plane' || vehicleType === 'blimp'
+      ? 'air'
+      : vehicleType === 'boat' || vehicleType === 'submarine'
+        ? 'sea'
+        : 'land';
+
+  const data: VehicleData = {
+    acceleration: +GetVehicleModelAcceleration(hash).toFixed(4),
+    braking: +GetVehicleModelMaxBraking(hash).toFixed(4),
+    handling: +GetVehicleModelEstimatedAgility(hash).toFixed(4),
+    speed: +GetVehicleModelEstimatedMaxSpeed(hash).toFixed(4),
+    traction: +GetVehicleModelMaxTraction(hash).toFixed(4),
+    name: GetLabelText(GetDisplayNameFromVehicleModel(hash)),
+    make: make ? GetLabelText(make) : '',
+    class: GetVehicleClass(entity),
+    seats: GetVehicleModelNumberOfSeats(hash),
+    doors: GetNumberOfVehicleDoors(entity),
+    type: vehicleType,
+    price: 0,
+    category: vehicleCategory,
+  };
+
+  if (DoesVehicleHaveWeapons(entity)) data.weapons = true;
+
+  CalculateVehiclePrice(data, entity);
+
+  console.log(`^5Parsed valid model ${model} (${data.make || '?'} ${data.name})^0`);
+
+  return data;
+}
+
+function CalculateVehiclePrice(data: VehicleData, entity: number) {
+  let price = data.braking + data.acceleration + data.handling + data.speed;
+
+  if (GetVehicleHasKers(entity)) price *= 2;
+  if (GetHasRocketBoost(entity)) price *= 3;
+  if (GetCanVehicleJump(entity)) price *= 1.5;
+  if (GetVehicleHasParachute(entity)) price *= 1.5;
+  if (data.weapons) price *= 5;
+
+  data.price = Math.floor(price * (PRICE_WEIGHTS[data.type] ?? 1));
+}
+
+function CleanupVehicle(entity: number, coords: [number, number, number]) {
+  SetVehicleAsNoLongerNeeded(entity);
+  SetModelAsNoLongerNeeded(GetEntityModel(entity));
+  DeleteEntity(entity);
+  SetEntityCoordsNoOffset(cache.ped, ...coords, false, false, false);
+}
+
+/**
+ * An event only registered when DEBUG is enabled.
+ * Allows external scripts to freely modify vehicle data.
+ */
+on('ox:setVehicleData', (model: string, data: Record<string, any>) => {
+  if (!vehicles[model]) console.error(`Cannot set vehicle data for ${model} (invalid model)`);
+
+  Object.assign(vehicles[model], data);
+});
+
+onServerCallback('ox:generateVehicleData', async (parseAll: boolean) => {
+  const coords = GetEntityCoords(cache.ped, true) as [number, number, number];
+  const invalidVehicles: string[] = [];
+  const vehicleModels = GetVehicleModels(parseAll);
 
   SetPlayerControl(cache.playerId, false, 1 << 8);
   FreezeEntityPosition(cache.ped, true);
 
-  notify({
-    title: 'Generating vehicle data',
-    description: `${vehicleModels.length} models loaded.`,
-    type: 'inform',
-  });
+  notify({ title: 'Generating vehicle data', description: `${vehicleModels.length} models loaded.`, type: 'inform' });
 
   let parsed = 0;
 
-  for (let index = 0; index < vehicleModels.length; index++) {
-    const model = vehicleModels[index];
-    const hash = await requestModel(model, 5000);
+  for (let i = 0; i < vehicleModels.length; i += BATCH_SIZE) {
+    await Promise.all(
+      vehicleModels.slice(i, i + BATCH_SIZE).map(async (model) => {
+        model = model.toLowerCase();
+        const hash = GetHashKey(model);
+        const isValid = await IsModelValid(hash);
 
-    if (!hash) return;
+        if (!isValid) return invalidVehicles.push(model);
 
-    const entity = CreateVehicle(hash, coords[0], coords[1], coords[2], 0, false, false);
-    let make = GetMakeNameFromVehicleModel(hash);
+        try {
+          const entity = SpawnVehicle(hash, coords);
+          vehicles[model] = ParseVehicleData(entity, hash, model);
+          emit(`ox:parsedVehicle`, model, entity);
+          ++parsed;
 
-    if (!make) {
-      const make2 = GetMakeNameFromVehicleModel(model.replace(/\W/g, ''));
-
-      if (make2 !== 'CARNOTFOUND') make = make2;
-    }
-
-    SetPedIntoVehicle(cache.ped, entity, -1);
-
-    const vehicleClass = GetVehicleClass(entity);
-    const vehicleType = GetVehicleType(entity) as VehicleTypes;
-
-    const stats: VehicleStats = {
-      acceleration: parseFloat(GetVehicleModelAcceleration(hash).toFixed(4)),
-      braking: parseFloat(GetVehicleModelMaxBraking(hash).toFixed(4)),
-      handling: parseFloat(GetVehicleModelEstimatedAgility(hash).toFixed(4)),
-      speed: parseFloat(GetVehicleModelEstimatedMaxSpeed(hash).toFixed(4)),
-      traction: parseFloat(GetVehicleModelMaxTraction(hash).toFixed(4)),
-    };
-
-    const data: VehicleData = {
-      acceleration: stats.acceleration,
-      braking: stats.braking,
-      handling: stats.handling,
-      speed: stats.speed,
-      traction: stats.traction,
-      name: GetLabelText(GetDisplayNameFromVehicleModel(hash)),
-      make: make ? GetLabelText(make) : '',
-      class: vehicleClass,
-      seats: GetVehicleModelNumberOfSeats(hash),
-      doors: GetNumberOfVehicleDoors(entity),
-      type: vehicleType,
-      price: 0,
-    };
-
-    console.log(index, model, `^3| ${data.make} ${data.name}^0`);
-
-    const weapons = DoesVehicleHaveWeapons(entity);
-
-    if (weapons) data.weapons = true;
-
-    if (vehicleType !== 'trailer' && vehicleType !== 'train') {
-      let vehicleCategory: VehicleCategories;
-
-      if (vehicleType === 'heli' || vehicleType === 'plane' || vehicleType === 'blimp') {
-        vehicleCategory = 'air';
-      } else if (vehicleType === 'boat' || vehicleType === 'submarine') {
-        vehicleCategory = 'sea';
-      } else {
-        vehicleCategory = 'land';
-      }
-
-      const topTypeStats = GetTopVehicleStats(vehicleCategory) || ({} as VehicleStats);
-
-      for (const [key, value] of Object.entries(stats) as [keyof VehicleStats, number][]) {
-        if (!topTypeStats[key] || value > topTypeStats[key]) topTypeStats[key] = value;
-      }
-    }
-
-    let price = stats.braking + stats.acceleration + stats.handling + stats.speed;
-
-    if (GetVehicleHasKers(entity)) price *= 2;
-    if (GetHasRocketBoost(entity)) price *= 3;
-    if (GetCanVehicleJump(entity)) price *= 1.5;
-    if (GetVehicleHasParachute(entity)) price *= 1.5;
-    if (data.weapons) price *= 5;
-
-    if (IsThisModelAnAmphibiousCar(hash)) {
-      data.type = 'amphibious_automobile';
-      price *= 4;
-    } else if (IsThisModelAnAmphibiousQuadbike(hash)) {
-      data.type = 'amphibious_quadbike';
-      price *= 4;
-    }
-
-    parsed++;
-    vehicles[model] = data;
-    const priceModifier = vehiclePriceModifiers[vehicleType];
-
-    if (priceModifier) data.price = Math.floor(price * priceModifier);
-
-    SetVehicleAsNoLongerNeeded(entity);
-    SetModelAsNoLongerNeeded(hash);
-    DeleteEntity(entity);
-    SetEntityCoordsNoOffset(cache.ped, coords[0], coords[1], coords[2], false, false, false);
+          CleanupVehicle(entity, coords);
+        } catch {
+          invalidVehicles.push(model);
+        }
+      }),
+    );
   }
 
   SetPlayerControl(cache.playerId, true, 0);
@@ -140,9 +183,18 @@ onServerCallback('ox:generateVehicleData', async (parseAll: boolean) => {
 
   notify({
     title: 'Generated vehicle data',
-    description: `Generated new data for ${parsed}/${vehicleModels.length} models.`,
+    description: `Generated data for ${parsed}/${vehicleModels.length} models.`,
     type: 'success',
   });
 
-  return [vehicles, GetTopVehicleStats()];
+  console.log(`^5Generated data for ${parsed}/${vehicleModels.length} models.^0`);
+
+  if (invalidVehicles.length)
+    console.log(
+      `^3Failed to parse data for ${invalidVehicles.length} invalid vehicles.\n${JSON.stringify(invalidVehicles, null, 2)}^0`,
+    );
+
+  await sleep(5000);
+
+  return [vehicles, GetTopVehicleStats(), invalidVehicles];
 });

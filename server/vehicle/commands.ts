@@ -9,9 +9,12 @@ export function DeleteCurrentVehicle(ped: number) {
 
   if (!entity) return;
 
-  const vehicle = OxVehicle.get(entity);
+  const vehicle = OxVehicle.getFromEntity(entity);
 
-  vehicle ? vehicle.setStored('impound', true) : DeleteEntity(entity);
+  if (!vehicle) return DeleteEntity(entity);
+
+  vehicle.setStored('impound', true);
+  vehicle.remove();
 }
 
 addCommand<{ model: string; owner?: number }>(
@@ -29,14 +32,14 @@ addCommand<{ model: string; owner?: number }>(
 
     const vehicle = await CreateVehicle(data, GetEntityCoords(ped), GetEntityHeading(ped));
 
-    if (!vehicle) return;
+    if (!vehicle.entity) return vehicle.remove();
 
     DeleteCurrentVehicle(ped);
     await sleep(200);
     SetPedIntoVehicle(ped, vehicle.entity, -1);
   },
   {
-    help: `Spawn a vehicle with the given model.`,
+    help: 'Spawn a vehicle with the given model.',
     params: [
       { name: 'model', paramType: 'string', help: 'The vehicle archetype.' },
       {
@@ -47,7 +50,7 @@ addCommand<{ model: string; owner?: number }>(
       },
     ],
     restricted: 'group.admin',
-  }
+  },
 );
 
 addCommand<{ radius?: number; owned?: string }>(
@@ -65,15 +68,18 @@ addCommand<{ radius?: number; owned?: string }>(
       const vehicle = OxVehicle.getFromNetId(netId);
 
       if (!vehicle) DeleteEntity(NetworkGetEntityFromNetworkId(netId));
-      else if (args.owned) vehicle.setStored('impound', true);
+      else if (args.owned) {
+        vehicle.setStored('impound', true);
+        vehicle.remove();
+      }
     });
   },
   {
-    help: `Deletes your current vehicle, or any vehicles within range.`,
+    help: 'Deletes your current vehicle, or any vehicles within range.',
     params: [
       { name: 'radius', paramType: 'number', help: 'The radius to despawn vehicles (defaults to 2).', optional: true },
       { name: 'owned', help: 'Include player-owned vehicles.', optional: true },
     ],
     restricted: 'group.admin',
-  }
+  },
 );

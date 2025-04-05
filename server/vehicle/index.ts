@@ -1,16 +1,13 @@
-import { OxVehicle } from './class';
-import { CreateNewVehicle, GetStoredVehicleFromId, IsPlateAvailable, VehicleRow } from './db';
+import { OxVehicle, Vec3 } from './class';
+import { CreateNewVehicle, GetStoredVehicleFromId, IsPlateAvailable, type VehicleRow } from './db';
 import { GetVehicleData } from '../../common/vehicles';
 import { DEBUG } from '../../common/config';
 import './class';
 import './commands';
 import './events';
-import { VehicleProperties } from '@overextended/ox_lib/server';
-import { Vector3 } from '@nativewrappers/server';
+import type { VehicleProperties } from '@overextended/ox_lib/server';
 
 if (DEBUG) import('./parser');
-
-type Vec3 = number[] | { x: number; y: number; z: number } | { buffer: any };
 
 export interface CreateVehicleData {
   model: string;
@@ -24,7 +21,7 @@ export async function CreateVehicle(
   data: string | (CreateVehicleData & Partial<VehicleRow>),
   coords?: Vec3,
   heading?: number,
-  invokingScript = GetInvokingResource()
+  invokingScript = GetInvokingResource(),
 ) {
   if (typeof data === 'string') data = { model: data };
 
@@ -32,14 +29,14 @@ export async function CreateVehicle(
 
   if (!vehicleData)
     throw new Error(
-      `Failed to create vehicle '${data.model}' (model is invalid).\nEnsure vehicle exists in '@ox_core/common/data/vehicles.json'`
+      `Failed to create vehicle '${data.model}' (model is invalid).\nEnsure vehicle exists in '@ox_core/common/data/vehicles.json'`,
     );
 
   if (data.id) {
     const vehicle = OxVehicle.getFromVehicleId(data.id);
 
     if (vehicle) {
-      if (DoesEntityExist(vehicle.entity)) {
+      if (vehicle.entity && DoesEntityExist(vehicle.entity)) {
         return vehicle;
       }
 
@@ -47,12 +44,9 @@ export async function CreateVehicle(
     }
   }
 
-  if (coords) coords = Vector3.fromObject(coords);
+  const isOwned = !!(data.owner || data.group);
 
-  const entity = coords ? OxVehicle.spawn(data.model, coords as Vector3, heading || 0) : 0;
-
-  if (!data.vin && (data.owner || data.group)) data.vin = await OxVehicle.generateVin(vehicleData);
-  if (data.vin && !data.owner && !data.group) delete data.vin;
+  if (!data.vin) data.vin = await OxVehicle.generateVin(vehicleData, isOwned);
 
   data.plate =
     data.vin && data.plate
@@ -64,7 +58,7 @@ export async function CreateVehicle(
   const metadata = data.data || ({} as { properties?: VehicleProperties; [key: string]: any });
   metadata.properties = data.properties || data.data?.properties || ({} as VehicleProperties);
 
-  if (!data.id && data.vin) {
+  if (!data.id && data.vin && isOwned) {
     data.id = await CreateNewVehicle(
       data.plate,
       data.vin,
@@ -73,17 +67,15 @@ export async function CreateVehicle(
       data.model,
       vehicleData.class,
       metadata,
-      data.stored || null
+      data.stored || null,
     );
   }
-
-  if (!entity || !DoesEntityExist(entity)) return;
 
   const properties = data.properties || metadata.properties || ({} as VehicleProperties);
   delete metadata.properties;
 
-  return new OxVehicle(
-    entity,
+  const vehicle = new OxVehicle(
+    data.vin,
     invokingScript,
     data.plate,
     data.model,
@@ -92,15 +84,22 @@ export async function CreateVehicle(
     metadata,
     properties,
     data.id,
-    data.vin,
     data.owner,
-    data.group
+    data.group,
   );
+
+  if (coords) {
+    vehicle.respawn(coords, heading || 0);
+  }
+
+  if (vehicle.entity) vehicle.setStored(null, false);
+
+  return vehicle;
 }
 
-export async function SpawnVehicle(id: number, coords: Vec3, heading?: number) {
+export async function SpawnVehicle(id: number | string, coords?: Vec3, heading?: number) {
   const invokingScript = GetInvokingResource();
-  const vehicle = await GetStoredVehicleFromId(id);
+  const vehicle = await GetStoredVehicleFromId(id, typeof id === 'string' ? 'vin' : 'id');
 
   if (!vehicle) return;
 
